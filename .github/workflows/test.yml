@@ -1,0 +1,35 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      # Clippy on deny(warnings) is the Rust analog of the sibling repos' vet
+      # gates: it fails the build on lints rather than letting them accrue.
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Fetches the vendored conformance fixtures pinned by UMPIRE_SPEC_SHA256
+      # in the Makefile, so a silent edit to the fixtures fails here instead
+      # of in a consumer.
+      - name: Sync spec fixtures
+        run: make spec-sync
+
+      - name: Test
+        run: cargo test

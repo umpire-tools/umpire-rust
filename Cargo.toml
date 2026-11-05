@@ -1,0 +1,16 @@
+[package]
+name = "umpire"
+version = "0.1.0"
+edition = "2021"
+description = "Rust-native Umpire semantics: a live evaluator for Umpire availability schemas"
+repository = "https://github.com/umpire-tools/umpire-rust"
+license = "MIT"
+keywords = ["umpire", "availability", "forms", "validation"]
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = "2"
+regex = "1"
+url = "2"
+
+[dev-dependencies]
