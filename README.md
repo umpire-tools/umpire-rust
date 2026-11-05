@@ -19,7 +19,7 @@ availability fixtures plus the validate/evaluate failure fixtures.
 ## Installation
 
 ```bash
-cargo add umpire
+cargo add umpire-core
 ```
 
 ## Quick Start
