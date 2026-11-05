@@ -26,6 +26,8 @@ jobs:
             exit 1
           fi
 
+      # The token needs publish-new (first publish) and publish-update
+      # (later versions); scope it to the umpire-core crate pattern.
       - name: Publish to crates.io
         run: cargo publish
         env:
