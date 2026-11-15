@@ -88,29 +88,8 @@ fn hydrate_schema(root: &serde_json::Map<String, Value>) -> Result<Schema> {
         }
     }
 
-    let mut field_order: Vec<String> = Vec::new();
-    let mut fields: IndexMap<String, FieldDef> = IndexMap::new();
-    for (name, def_value) in fields_obj {
-        field_order.push(name.clone());
-        let def_obj = def_value.as_object().unwrap_or(&empty);
-        let mut def = FieldDef::default();
-        if def_obj
-            .get("required")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            def.required = true;
-        }
-        if let Some(default_value) = def_obj.get("default") {
-            def.default = Some(default_value.clone());
-        }
-        if let Some(strategy) = def_obj.get("isEmpty").and_then(Value::as_str) {
-            if !strategy.is_empty() {
-                def.is_empty = IsEmptyStrategy::from_name(strategy).unwrap_or_default();
-            }
-        }
-        fields.insert(name.clone(), def);
-    }
+    let fields = field_defs_from_json(fields_obj);
+    let field_order: Vec<String> = fields.keys().cloned().collect();
 
     let mut warnings: Vec<String> = Vec::new();
     let mut excluded: Vec<Value> = Vec::new();
@@ -134,7 +113,7 @@ fn hydrate_schema(root: &serde_json::Map<String, Value>) -> Result<Schema> {
     if let Some(raw_rules) = root.get("rules").and_then(Value::as_array) {
         for raw_rule in raw_rules {
             let rule_obj = raw_rule.as_object().unwrap_or(&empty);
-            let rule = build_rule(rule_obj, fields_obj, &conditions)?;
+            let rule = build_rule(rule_obj, &fields, &conditions)?;
             rules.push(rule);
         }
     }
@@ -167,15 +146,44 @@ fn hydrate_schema(root: &serde_json::Map<String, Value>) -> Result<Schema> {
     })
 }
 
-// buildRule builds a Rule from a validated rule object. field_names comes
-// from the schema's fields object.
+// field_defs_from_json parses a schema's `fields` object into field
+// definitions. Validation has already rejected unknown members and isEmpty
+// strategies, so every declared strategy resolves.
+pub(crate) fn field_defs_from_json(
+    fields_obj: &serde_json::Map<String, Value>,
+) -> IndexMap<String, FieldDef> {
+    let empty = serde_json::Map::new();
+    let mut fields: IndexMap<String, FieldDef> = IndexMap::new();
+    for (name, def_value) in fields_obj {
+        let def_obj = def_value.as_object().unwrap_or(&empty);
+        let mut def = FieldDef::default();
+        if def_obj
+            .get("required")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            def.required = true;
+        }
+        if let Some(default_value) = def_obj.get("default") {
+            def.default = Some(default_value.clone());
+        }
+        if let Some(strategy) = def_obj.get("isEmpty").and_then(Value::as_str) {
+            if !strategy.is_empty() {
+                def.is_empty = IsEmptyStrategy::from_name(strategy).unwrap_or_default();
+            }
+        }
+        fields.insert(name.clone(), def);
+    }
+    fields
+}
+
+// buildRule builds a Rule from a validated rule object.
 fn build_rule(
     rule_obj: &serde_json::Map<String, Value>,
-    fields_obj: &serde_json::Map<String, Value>,
+    fields: &IndexMap<String, FieldDef>,
     conditions: &HashMap<String, ConditionDef>,
 ) -> Result<Rule> {
     let empty = serde_json::Map::new();
-    let field_names: std::collections::HashSet<String> = fields_obj.keys().cloned().collect();
     let rule_type = rule_obj
         .get("type")
         .and_then(Value::as_str)
@@ -219,7 +227,7 @@ fn build_rule(
                             sources.push(dep_name.to_string());
                         }
                         None => {
-                            let expr = compile_expr(d, &field_names, conditions)?;
+                            let expr = compile_expr(d, fields, conditions)?;
                             if !expr.check_field.is_empty() {
                                 sources.push(expr.check_field.clone());
                             }
@@ -234,7 +242,7 @@ fn build_rule(
             }
             let expr = compile_expr(
                 rule_obj.get("when").unwrap_or(&Value::Null),
-                &field_names,
+                fields,
                 conditions,
             )?;
             let sources: Vec<String> = if expr.check_field.is_empty() {
@@ -251,7 +259,7 @@ fn build_rule(
             let field = field();
             let expr = compile_expr(
                 rule_obj.get("when").unwrap_or(&Value::Null),
-                &field_names,
+                fields,
                 conditions,
             )?;
             let mut rule = Rule::enabled_when(field, crate::expr::Pred::And(Vec::new()), "");
@@ -263,7 +271,7 @@ fn build_rule(
             let field = field();
             let expr = compile_expr(
                 rule_obj.get("when").unwrap_or(&Value::Null),
-                &field_names,
+                fields,
                 conditions,
             )?;
             let mut rule = Rule::fair_when(field, crate::expr::Pred::And(Vec::new()), "");
@@ -290,7 +298,7 @@ fn build_rule(
             }
             let expr = compile_expr(
                 rule_obj.get("when").unwrap_or(&Value::Null),
-                &field_names,
+                fields,
                 conditions,
             )?;
             let sources: Vec<String> = if expr.check_field.is_empty() {
@@ -333,7 +341,7 @@ fn build_rule(
             let mut inner: Vec<Rule> = Vec::new();
             for raw in rules_raw.map(|v| v.as_slice()).unwrap_or(&[]) {
                 let inner_obj = raw.as_object().unwrap_or(&empty);
-                inner.push(build_rule(inner_obj, fields_obj, conditions)?);
+                inner.push(build_rule(inner_obj, fields, conditions)?);
             }
             Ok(Rule::any_of(inner))
         }
@@ -348,7 +356,7 @@ fn build_rule(
                 let mut branch_rules: Vec<Rule> = Vec::new();
                 for raw in raw_rules.as_array().map(|v| v.as_slice()).unwrap_or(&[]) {
                     let inner_obj = raw.as_object().unwrap_or(&empty);
-                    branch_rules.push(build_rule(inner_obj, fields_obj, conditions)?);
+                    branch_rules.push(build_rule(inner_obj, fields, conditions)?);
                 }
                 branches.push((branch_name.clone(), branch_rules));
             }

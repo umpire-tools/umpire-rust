@@ -30,6 +30,17 @@ impl IsEmptyStrategy {
             _ => None,
         }
     }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            IsEmptyStrategy::Present => "present",
+            IsEmptyStrategy::String => "string",
+            IsEmptyStrategy::Number => "number",
+            IsEmptyStrategy::Boolean => "boolean",
+            IsEmptyStrategy::Array => "array",
+            IsEmptyStrategy::Object => "object",
+        }
+    }
 }
 
 /// Defines a field's structure and emptiness semantics.
