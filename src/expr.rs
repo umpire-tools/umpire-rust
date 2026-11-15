@@ -1,9 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
+use indexmap::IndexMap;
 use serde_json::{Map, Value};
 
 use crate::checkops::CheckOp;
 use crate::error::{Result, UmpireError};
+use crate::field::{FieldDef, IsEmptyStrategy};
 use crate::values::{is_truthy, json_contains, json_equal};
 
 /// A compiled DSL expression reduced to a predicate. `check_field` is set
@@ -72,6 +74,12 @@ pub enum Pred {
         field: String,
         values: Vec<Value>,
     },
+    /// True when the field's array value holds an element equal to `value`.
+    /// A value that is not an array gives false.
+    Contains {
+        field: String,
+        value: Value,
+    },
     Cond {
         condition: String,
     },
@@ -114,14 +122,51 @@ fn values_of(obj: &Map<String, Value>) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-fn assert_expr_field(field: &str, op: &str, field_names: &HashSet<String>) -> Result<()> {
-    if !field_names.contains(field) {
+fn assert_expr_field(field: &str, op: &str, fields: &IndexMap<String, FieldDef>) -> Result<()> {
+    if !fields.contains_key(field) {
         return Err(UmpireError::new(format!(
             "[@umpire/dsl] Unknown field {:?} in {:?} expression",
             field, op
         )));
     }
     Ok(())
+}
+
+// assert_membership_field rejects a membership op whose target field's
+// declared emptiness contradicts it: `in`, `notIn`, and `fieldInCond` need a
+// scalar field, and `contains` needs an array.
+fn assert_membership_field(
+    field: &str,
+    op: &str,
+    fields: &IndexMap<String, FieldDef>,
+) -> Result<()> {
+    let Some(def) = fields.get(field) else {
+        return Ok(());
+    };
+    match op {
+        "in" | "notIn" | "fieldInCond" if def.is_empty == IsEmptyStrategy::Array => {
+            Err(UmpireError::new(format!(
+                "[@umpire/dsl] {:?} requires a scalar field, but {:?} is declared \"isEmpty\": \"array\"",
+                op, field
+            )))
+        }
+        "contains"
+            if matches!(
+                def.is_empty,
+                IsEmptyStrategy::String
+                    | IsEmptyStrategy::Number
+                    | IsEmptyStrategy::Boolean
+                    | IsEmptyStrategy::Object
+            ) =>
+        {
+            Err(UmpireError::new(format!(
+                "[@umpire/dsl] \"contains\" requires an array field, but {:?} is declared \"isEmpty\": {:?}",
+                field,
+                def.is_empty.name()
+            )))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn get_condition_value<'a>(
@@ -187,6 +232,9 @@ impl Pred {
                 field,
                 values: items,
             } => Ok(!json_contains(items, value_at(values, field))),
+            Pred::Contains { field, value } => Ok(value_at(values, field)
+                .as_array()
+                .is_some_and(|items| json_contains(items, value))),
             Pred::Cond { condition } => Ok(is_truthy(get_condition_value(condition, conditions)?)),
             Pred::CondEq { condition, value } => Ok(json_equal(
                 get_condition_value(condition, conditions)?,
@@ -241,7 +289,7 @@ impl Pred {
 // @umpire/dsl's compileExpr plus @umpire/json's check expressions.
 pub(crate) fn compile_expr(
     raw: &Value,
-    field_names: &HashSet<String>,
+    fields: &IndexMap<String, FieldDef>,
     conditions: &HashMap<String, crate::schema::ConditionDef>,
 ) -> Result<CompiledExpr> {
     let obj = raw
@@ -249,7 +297,7 @@ pub(crate) fn compile_expr(
         .ok_or_else(|| UmpireError::new("[@umpire/dsl] Expression must be an object"))?;
     let op = obj.get("op").and_then(Value::as_str).unwrap_or_default();
 
-    if let Some(pred) = field_predicate(obj, op, field_names)? {
+    if let Some(pred) = field_predicate(obj, op, fields)? {
         return Ok(pred);
     }
     if let Some(pred) = condition_predicate(obj, op, conditions)? {
@@ -259,7 +307,8 @@ pub(crate) fn compile_expr(
     match op {
         "fieldInCond" => {
             let field = field_of(obj);
-            assert_expr_field(&field, op, field_names)?;
+            assert_expr_field(&field, op, fields)?;
+            assert_membership_field(&field, op, fields)?;
             let condition = obj
                 .get("condition")
                 .and_then(Value::as_str)
@@ -300,7 +349,7 @@ pub(crate) fn compile_expr(
             let mut compiled = Vec::with_capacity(exprs.len());
             let mut refs: Vec<String> = Vec::new();
             for entry in exprs {
-                let c = compile_expr(entry, field_names, conditions)?;
+                let c = compile_expr(entry, fields, conditions)?;
                 if !c.check_field.is_empty() && !refs.contains(&c.check_field) {
                     refs.push(c.check_field);
                 }
@@ -317,7 +366,7 @@ pub(crate) fn compile_expr(
             let inner_raw = obj.get("expr").ok_or_else(|| {
                 UmpireError::new("[@umpire/dsl] \"not\" expression requires an expr field")
             })?;
-            let inner = compile_expr(inner_raw, field_names, conditions)?;
+            let inner = compile_expr(inner_raw, fields, conditions)?;
             let check_field = inner.check_field.clone();
             Ok(with_check_field(
                 Pred::Not(Box::new(inner.pred)),
@@ -326,7 +375,7 @@ pub(crate) fn compile_expr(
         }
         "check" => {
             let field = field_of(obj);
-            assert_expr_field(&field, op, field_names)?;
+            assert_expr_field(&field, op, fields)?;
             let check_obj = obj
                 .get("check")
                 .cloned()
@@ -368,11 +417,12 @@ fn single_ref(refs: Vec<String>) -> String {
 fn field_predicate(
     obj: &Map<String, Value>,
     op: &str,
-    field_names: &HashSet<String>,
+    fields: &IndexMap<String, FieldDef>,
 ) -> Result<Option<CompiledExpr>> {
     let field = || field_of(obj);
     let checked = |field: String, pred: Pred| -> Result<Option<CompiledExpr>> {
-        assert_expr_field(&field, op, field_names)?;
+        assert_expr_field(&field, op, fields)?;
+        assert_membership_field(&field, op, fields)?;
         Ok(Some(with_check_field(pred, field)))
     };
     match op {
@@ -434,6 +484,13 @@ fn field_predicate(
             Pred::NotIn {
                 field: field(),
                 values: values_of(obj),
+            },
+        ),
+        "contains" => checked(
+            field(),
+            Pred::Contains {
+                field: field(),
+                value: value_of(obj),
             },
         ),
         _ => Ok(None),

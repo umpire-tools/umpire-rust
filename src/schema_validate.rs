@@ -1,12 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
+use indexmap::IndexMap;
 use serde_json::{Map, Value};
 
 use crate::checkops::regex_error_detail;
 use crate::error::{schema_err, Result};
 use crate::expr::compile_expr;
-use crate::field::IsEmptyStrategy;
-use crate::schema::ConditionDef;
+use crate::field::{FieldDef, IsEmptyStrategy};
+use crate::schema::{field_defs_from_json, ConditionDef};
 
 const RULE_MEMBERS_CONTEXT: &str = "Rule";
 
@@ -386,6 +387,17 @@ fn validate_expression(raw: &Value) -> Result<()> {
                 &format!("Expression {:?} values", op),
             )
         }
+        "contains" => {
+            assert_known_members(o, &["op", "field", "value"], "Expression")?;
+            assert_string(
+                o.get("field").unwrap_or(&Value::Null),
+                "Expression \"contains\" field",
+            )?;
+            let value = o.get("value").ok_or_else(|| {
+                schema_err("[@umpire/json] Expression \"contains\" requires a value")
+            })?;
+            assert_primitive(value, "Expression \"contains\" value")
+        }
         "cond" => {
             assert_known_members(o, &["op", "condition"], "Expression")?;
             assert_string(
@@ -462,8 +474,12 @@ fn validate_expression(raw: &Value) -> Result<()> {
     }
 }
 
-fn assert_rule_field(field: &str, field_names: &HashSet<String>, context: &str) -> Result<()> {
-    if !field_names.contains(field) {
+fn assert_rule_field(
+    field: &str,
+    fields: &IndexMap<String, FieldDef>,
+    context: &str,
+) -> Result<()> {
+    if !fields.contains_key(field) {
         return Err(schema_err(format!(
             "[@umpire/json] Rule {} references unknown field {:?}",
             context, field
@@ -855,7 +871,7 @@ fn validate_validator_spec_members_named(
 // recursing into composites. Mirrors the TS core's validateRule.
 fn validate_rule(
     raw: &Value,
-    field_names: &HashSet<String>,
+    fields: &IndexMap<String, FieldDef>,
     conditions: &HashMap<String, ConditionDef>,
 ) -> Result<()> {
     let Some(rule) = raw.as_object() else {
@@ -873,13 +889,13 @@ fn validate_rule(
     match rule_type {
         "requires" => {
             let field = field_of();
-            assert_rule_field(&field, field_names, "\"requires\"")?;
+            assert_rule_field(&field, fields, "\"requires\"")?;
             if rule.contains_key("dependency") {
                 let dependency = rule
                     .get("dependency")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                return assert_rule_field(dependency, field_names, "\"requires\"");
+                return assert_rule_field(dependency, fields, "\"requires\"");
             }
             if rule.contains_key("dependencies") {
                 let deps = rule
@@ -895,31 +911,21 @@ fn validate_rule(
                 for d in deps {
                     match d.as_str() {
                         Some(dep_name) => {
-                            assert_rule_field(dep_name, field_names, "\"requires\"")?;
+                            assert_rule_field(dep_name, fields, "\"requires\"")?;
                         }
                         None => {
-                            compile_expr(d, field_names, conditions)?;
+                            compile_expr(d, fields, conditions)?;
                         }
                     }
                 }
                 return Ok(());
             }
-            compile_expr(
-                rule.get("when").unwrap_or(&Value::Null),
-                field_names,
-                conditions,
-            )
-            .map(|_| ())
+            compile_expr(rule.get("when").unwrap_or(&Value::Null), fields, conditions).map(|_| ())
         }
         "enabledWhen" => {
             let field = field_of();
-            assert_rule_field(&field, field_names, "\"enabledWhen\"")?;
-            compile_expr(
-                rule.get("when").unwrap_or(&Value::Null),
-                field_names,
-                conditions,
-            )
-            .map(|_| ())
+            assert_rule_field(&field, fields, "\"enabledWhen\"")?;
+            compile_expr(rule.get("when").unwrap_or(&Value::Null), fields, conditions).map(|_| ())
         }
         "disables" => {
             let targets = rule
@@ -928,21 +934,16 @@ fn validate_rule(
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
             for t in targets {
-                assert_rule_field(t.as_str().unwrap_or_default(), field_names, "\"disables\"")?;
+                assert_rule_field(t.as_str().unwrap_or_default(), fields, "\"disables\"")?;
             }
             if rule.contains_key("source") {
                 let source = rule
                     .get("source")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                return assert_rule_field(source, field_names, "\"disables\"");
+                return assert_rule_field(source, fields, "\"disables\"");
             }
-            compile_expr(
-                rule.get("when").unwrap_or(&Value::Null),
-                field_names,
-                conditions,
-            )
-            .map(|_| ())
+            compile_expr(rule.get("when").unwrap_or(&Value::Null), fields, conditions).map(|_| ())
         }
         "oneOf" => {
             let empty_map = Map::new();
@@ -950,23 +951,22 @@ fn validate_rule(
                 .get("branches")
                 .and_then(Value::as_object)
                 .unwrap_or(&empty_map);
-            for (branch_name, fields) in branches {
+            for (branch_name, branch_fields) in branches {
                 let _ = branch_name;
-                for f in fields.as_array().map(|v| v.as_slice()).unwrap_or(&[]) {
-                    assert_rule_field(f.as_str().unwrap_or_default(), field_names, "\"oneOf\"")?;
+                for f in branch_fields
+                    .as_array()
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[])
+                {
+                    assert_rule_field(f.as_str().unwrap_or_default(), fields, "\"oneOf\"")?;
                 }
             }
             Ok(())
         }
         "fairWhen" => {
             let field = field_of();
-            assert_rule_field(&field, field_names, "\"fairWhen\"")?;
-            compile_expr(
-                rule.get("when").unwrap_or(&Value::Null),
-                field_names,
-                conditions,
-            )
-            .map(|_| ())
+            assert_rule_field(&field, fields, "\"fairWhen\"")?;
+            compile_expr(rule.get("when").unwrap_or(&Value::Null), fields, conditions).map(|_| ())
         }
         "eitherOf" => {
             let empty_map = Map::new();
@@ -977,7 +977,7 @@ fn validate_rule(
             for (branch_name, branch_rules) in branches {
                 let _ = branch_name;
                 for inner in branch_rules.as_array().map(|v| v.as_slice()).unwrap_or(&[]) {
-                    validate_rule(inner, field_names, conditions)?;
+                    validate_rule(inner, fields, conditions)?;
                 }
             }
             resolve_either_of_shape(rule).map(|_| ())
@@ -989,13 +989,13 @@ fn validate_rule(
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
             for inner in rules {
-                validate_rule(inner, field_names, conditions)?;
+                validate_rule(inner, fields, conditions)?;
             }
             resolve_composite_shape("anyOf()", rules).map(|_| ())
         }
         "check" => {
             let field = field_of();
-            assert_rule_field(&field, field_names, "\"check\"")
+            assert_rule_field(&field, fields, "\"check\"")
         }
         _ => Err(schema_err(format!(
             "[@umpire/json] Unknown rule type {:?}",
@@ -1088,15 +1088,15 @@ pub(crate) fn validate_schema_object(root: &Map<String, Value>) -> Result<()> {
         }
     }
 
-    let field_names: HashSet<String> = fields_obj.keys().cloned().collect();
-
     for (name, def) in fields_obj {
         validate_field_def(name, def)?;
     }
+    let fields = field_defs_from_json(fields_obj);
+    let field_names: HashSet<String> = fields.keys().cloned().collect();
 
     if let Some(rules) = root.get("rules").and_then(Value::as_array) {
         for rule in rules {
-            validate_rule(rule, &field_names, &conditions)?;
+            validate_rule(rule, &fields, &conditions)?;
         }
     }
 
