@@ -1,6 +1,6 @@
 [package]
 name = "umpire-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Rust-native Umpire semantics: a live evaluator for Umpire availability schemas"
 repository = "https://github.com/umpire-tools/umpire-rust"
