@@ -28,7 +28,10 @@ impl CompiledExpr {
 }
 
 /// A DSL predicate over runtime values and conditions.
+///
+/// New spec operators add variants, so matches outside this crate need a wildcard arm.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum Pred {
     Eq {
         field: String,
